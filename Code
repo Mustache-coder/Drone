@@ -1,0 +1,422 @@
+from dronekit import connect, VehicleMode, LocationGlobalRelative, APIException, Command
+import time
+import socket
+import exception 
+import math
+import argparse
+from pymavlink import mavutil
+
+#SAVEDRONE SOFTWARE IS OWNED BY UNUSUSAL METHOD
+#www.umtpi.com - Copyright
+
+
+#ACTIVATE CODE IN TERMINAL AND GET QGROUNDCONTROL BY: LaunchSitl LifeDrone.py
+#Multiple packages need to been installed for this to work. 
+#This code is for AI control of Drone
+#Can and will be connected to RC-Controller
+#LINUX must be used for drone simulator
+
+
+
+#Height of drone/Launch in METERS
+height_M = 10
+
+#Arm - Yes/No True/False
+arm_it = True
+
+#Takeoff - Yes/No True/False
+take_off = True
+
+
+#auto-mode ON/OFF True/False
+#ONLY 1 MODE CAN BE ACTIVE AT THE SAME TIME. IF ONE GETS ACTIVE, ALL OTHERS BECOMES DEACTIVATED FIRST.
+#ONLY ONE AUTO FUNCTION CAN BE USED AT THE TIME - 2 ACTIVATED AT SAME TIME WILL PUT IT DOWN
+#Needs to be "CLEARED" after used once. 
+auto = True
+
+#Guided-mode ON/OFF TRUE/FALSE 
+#ONLY 1 MODE CAN BE ACTIVE AT THE SAME TIME. IF ONE GETS ACTIVE, ALL OTHERS BECOMES DEACTIVATED FIRST.
+#This is the mode we will have for being controlled by controller. 
+guided = False
+
+#RTL (Return to Launch) - True/False
+retola = False
+
+#Land (Land at current possition)
+landa = False
+
+
+#______________________THESE ARE FOR "AUTOMATIC/Pre-programmed trips - one needs to be activated/True for AUTO-mode to work"_____________________________________________
+#Activates back_and_forth AUTO True/False
+location_and_back = False
+#__________________________________________________________________________-
+#___________________________________________________________________________
+#Check around house AUTOMATIC FUNCTION FOR DRONE /True/False
+check_around_house = True
+#_______________________________________________________________________________________
+
+
+
+#LAT/LONG FOR BACK_AND_FORTH AUTO-MODE FUNCTION:
+BAF_LAT = 36.002754
+BAF_LON = -86.939858
+BAF_HEIGHT = 15
+
+
+
+#Connect Copter
+def connectcopter():
+
+	#Capture IP-Address we want script to connect to 
+
+	parser = argparse.ArgumentParser(description ='commands')
+	parser.add_argument('--connect')
+	args = parser.parse_args()
+
+	connection_string = args.connect
+
+	if not connection_string:
+		import dronekit_sitl
+		sitl = dronekit_sitl.start_default()
+		connection_string = sitl.connection_string()
+
+	vehicle = connect(connection_string,wait_ready=True)
+
+	return vehicle
+
+def prepare():
+
+	while vehicle.is_armable!=True:
+		print("Waiting for vehicle to become armable")
+		time.sleep(1)
+
+	print("vehicle is now armable(Ready)")
+
+	vehicle.mode = VehicleMode("GUIDED")
+
+	while vehicle.mode!='GUIDED':
+		print('Waiting for drone to enter GUIDED mode')
+
+		time.sleep(1)
+
+	print('Vehicle now in GUIDED mode and prepared')
+
+	return None
+
+def arm():
+
+	vehicle.armed = True
+
+	while vehicle.armed == False:
+		print('Waiting for vehicle to become armed')
+		time.sleep(1)
+
+	print('Propellers are Spinning')
+
+
+
+def takeoff(targetHeight):
+
+	vehicle.simple_takeoff(targetHeight) #meters
+
+	while True:
+		print("current Altitude: %d"%vehicle.location.global_relative_frame.alt)
+		if vehicle.location.global_relative_frame.alt>=.95*targetHeight:
+			break
+		time.sleep(1)
+
+	print("Target altitude reached")
+	return None
+
+
+#Must be done for YAW to be done... for some reason
+
+def dummy_yaw_initializer():
+
+	#Drone positions - Latitude, Longitude and Altitude
+	lat = vehicle.location.global_relative_frame.lat
+	lon = vehicle.location.global_relative_frame.lon
+	alt = vehicle.location.global_relative_frame.alt
+
+	aLocation = LocationGlobalRelative(lat,lon,alt)
+
+	msg = vehicle.message_factory.set_position_target_global_int_encode(
+		0,	#Time_boot_ms(Not used)
+		0,0,	#Target system, target component
+		mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, #FRAME	
+		0b0000111111111000, #--type_mask (only speed enabled)
+		aLocation.lat*1e7, #lat_int - x position in WGS84 frame in 1e7*meters
+		aLocation.lon*1e7, #lon_int - Y Position in WGS84 frame in 1e7*meters
+		aLocation.alt, #alt - Altitude in meters in AMSL altitute, not WGS84 if absolute or relative above terrain if GLOBAL_TERRAIN_ALT_IN
+		0, #X Velocity in NED frame in m/s
+		0, #Y Velocity in NED frame in m/s
+		0, #Z Velocity in NED frame in m/s
+		0,0,0, #afx, afy,afz aceleration (not supported yet, ignored in GCS_mavlink)
+		0,0)	#yaw,yaw_rate(not supported yet, ignored in GCS_Mavlink)
+
+	vehicle.send_mavlink(msg)
+	vehicle.flush()
+
+	time.sleep(1)
+
+def condition_yaw(degrees,relative):
+
+	#Wont work if "Dummy" function havn't been activated
+
+	if relative:
+		is_relative = 1 #yaw relative to direction of travel
+
+	else:
+		is_relative = 0 #yaw is an absolute angle (TRUE NORTH ETC)
+
+	#create the Condition_yaw command using command_long_encode()
+	msg = vehicle.message_factory.command_long_encode(
+		0,0, #target system, target component
+		mavutil.mavlink.MAV_CMD_CONDITION_YAW, #command
+		0, #confirmation
+		degrees, #Param 1, yaw in degrees
+		0, #Param 2, yaw speed deg/s
+		1, #param 3, direction - 1 ccw, 1 cw
+		is_relative, #param 4, relative offset 1, absolute angle 0
+		0,0,0) #param 5-7 not used
+		#send command to vehicle
+
+	vehicle.send_mavlink(msg)
+	vehicle.flush()
+
+
+#GUIDED MODE IS CONTROLLED MODE OF THE DRONE - BY SCRIPTS.
+def guided_mode():
+	vehicle.mode = VehicleMode('GUIDED')
+	while vehicle.mode != 'GUIDED':
+		time.sleep(1)
+
+#AUTO MODE ACTIVATES SCRIPT IN COMMANDS FOR THE DRONE - MAKES IT FLY AUTOMATICLLY
+def auto_mode():
+	vehicle.mode = VehicleMode('AUTO')
+	while vehicle.mode != 'AUTO':
+		time.sleep(1)
+
+
+#Return to Launch
+def rtl():
+	vehicle.mode = VehicleMode("RTL")
+	while vehicle.mode != "RTL":
+		print("Waiting for drone to enter RTL mode and return to home")
+		time.sleep(1)
+	print("vehicle in RTL mode")
+
+	while True:
+		time.sleep(1)
+
+
+#Land function
+def land():
+	vehicle.mode = VehicleMode("LAND")
+	while vehicle.mode != "LAND":
+		print("Waiting for drone to enter LAND mode")
+		time.sleep(1)
+	print("vehicle in LAND mode")
+
+	while True:
+		time.sleep(1)
+
+
+def check_around():
+	
+	#These Checkpoints COORDINATES(LONG/LAT) can / should be replaced by personal long/lat to be used for Safety and Security
+	#Lat(36) - Long(-86)
+
+	#Waypoint 1 (By Gate) Coordinates
+	wp1 = LocationGlobalRelative(36.000605,-86.935018,10)
+	
+	#Waypoint 2 (Close to House) Coordinates
+	wp2 = LocationGlobalRelative(36.000752,-86.936629,10)
+
+	#Waypoint 3 (Road by Garage) Coordinates
+	wp3 = LocationGlobalRelative(36.001707,-86.937627,10)
+
+	#Waypoint 4 (Top corner of pasture) Coordinates
+	wp4 = LocationGlobalRelative(36.001832,-86.936403, 10)
+
+	#Corner by Road - (Last Checkpoint) Coordinates
+	wp5 = LocationGlobalRelative(36.001376,-86.934649,10)
+
+	
+	wphome = vehicle.location.global_relative_frame
+
+	#THESE ARE OUR COMMANDS
+	cmd1 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wphome.lat,wphome.lon,wphome.alt)
+	cmd2 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wp1.lat,wp1.lon,10)
+	cmd3 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wp2.lat,wp2.lon,10)
+	cmd4 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wp3.lat,wp3.lon,10)
+	cmd5 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wp4.lat,wp4.lon,10)
+	cmd6 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wp5.lat,wp5.lon,10)
+	cmd7 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wphome.lat,wphome.lon,wphome.alt)
+	
+
+	#Download current list of commands FROM the drone were connected to
+	cmds = vehicle.commands
+	cmds.download()
+	cmds.wait_ready()
+
+	##Clear the current list of commands
+	cmds.clear()
+
+	#Add in our new commands
+	cmds.add(cmd1)
+	cmds.add(cmd2)
+	cmds.add(cmd3)
+	cmds.add(cmd4)
+	cmds.add(cmd5)
+	cmds.add(cmd6)
+	cmds.add(cmd7)
+	
+	#Upload our commands to the drone
+
+	vehicle.commands.upload()
+
+	#Just checking to see -- 
+	print("wp1.lat is {} wpl.lon is {}".format(wp1.lat, wp1.lon))
+
+#Alti = Altitude, Targetpointlat, targetpointlong is latitute and longitute of where you want drone to go.
+
+def back_and_forth(targetPointlat,targetPointlong,alti):
+
+
+	wphome = vehicle.location.global_relative_frame
+
+	wp1 = LocationGlobalRelative(targetPointlat,targetPointlong)
+
+	#These are our Commands
+	cmd1 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wphome.lat,wphome.lon,wphome.alt)
+	cmd2 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wp1.lat,wp1.lon,alti)
+	cmd3 = Command(0,0,0,mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,0,0,0,0,0,0,wphome.lat,wphome.lon,wphome.alt)
+
+
+	#Download current list of commands FROM the drone we are connected to.
+
+	cmds = vehicle.commands
+	cmds.download()
+	cmds.wait_ready()
+
+	#Clear the currentl list of commands
+	cmds.clear()
+
+	#Add in our new commands
+
+	cmds.add(cmd1)
+	cmds.add(cmd2)
+	cmds.add(cmd3)
+
+	#Upload Commands
+
+	vehicle.commands.upload()
+
+
+	
+
+#____________________________________________________________________________________________________________
+
+## Drone command that will activate IF THIS DRONE IS PUT IN AUTO MODE!
+
+#Command Template
+#Command(0,0,0,FrameOfReference,MAVLinkCommand,CurrentWP,AutoContinue,param1,param2,param3,param4,param5,param6,param7)
+
+
+
+#NEED TO ADD IN GUI APPLICATION TO "CHECK" BOXES OF TO SEE IF WE CAN CHANGE/OPERATE DRONE MID FLIGHT.
+
+
+
+#MAIN EXECUTABLE
+vehicle = connectcopter()
+
+#If True - This auto function will be started when "Auto-mode" is Activated.
+if check_around_house == True:
+	check_around()
+	#Testing
+	#time.sleep(30)
+	#check_around_house = False
+
+
+
+#If True - This auto function will be started when "Auto-mode" is Activated.
+if location_and_back == True:
+	back_and_forth(BAF_LAT,BAF_LON,BAF_HEIGHT)
+	
+
+
+
+
+#Functions - 
+
+#Prepare - Drone is now Armable(ready) and mode is set to GUIDED
+#This happens when drone is turned ON.
+prepare()
+
+#Arm - Drone is now Armed, Propellers are spinning
+if arm_it == True:
+	arm()
+
+
+#Takeoff - Drone will launch to set meter height in (height_M)
+if take_off == True:
+	takeoff(height_M)
+
+	#Dummy to make condition_yaw affective
+	dummy_yaw_initializer()
+
+	#Get into True North = 0,0 (0,1 = north for drone) after Launc
+	print("yawing into True NORTH")
+	condition_yaw(0,0)
+	time.sleep(6)
+
+
+
+# #Dummy to make condition_yaw affective
+# dummy_yaw_initializer()
+
+# #Get into True North = 0,0 (0,1 = north for drone) after Launch
+# print("yawing into drone NORTH")
+# condition_yaw(0,1)
+# time.sleep(2)
+
+#Here it's initiating all the commands we gave it right after vehicle got connected.
+#Make this IF statement like "If bla checked/Pressed/etc - This will take take drone off GUIDED.
+
+while take_off == True:
+
+	if auto == True and guided == False:
+		print("AUTO is True")
+		auto_mode()
+		time.sleep(1)
+		print("{}".format(vehicle.mode))
+	elif guided == True and auto == False:
+		print("GUIDED is True") #Print that Guided mode is activated
+		guided_mode() #Guided Mode Activated
+		time.sleep(1) #Sleep for 1 second
+		print("{}".format(vehicle.mode)) #Print the mode you're in
+
+		#Want to move to another function, that will control the drone w/controller
+		#Ex: Function that has while statement: So I can control
+		
+	elif auto == True and guided == True:
+		print("AUTO and GUIDED activated at the same time: Will keep current mode: {}".format(vehicle.mode))
+		if vehicle.mode == 'AUTO':
+			global guided
+			guided = False
+		else:
+			auto = False
+			guided = True
+	else:
+		print("Auto is False and Guided is False: {}".format(vehicle.mode))
+
+	time.sleep(10)
+
+
+
+
+
+while True:
+	time.sleep(1)
